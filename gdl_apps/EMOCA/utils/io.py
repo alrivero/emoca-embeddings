@@ -59,8 +59,14 @@ def save_images(outfolder, name, vis_dict, i = 0, with_detection=False):
     imsave(final_out_folder / f"out_im_detail.png", _fix_image(torch_img_to_np(vis_dict['output_images_detail'][i])))
 
 
-def save_codes(output_folder, name, vals, i = None):
-    if i is None:
+def save_codes(output_folder, name, vals, i = None, encoding=True):
+    if encoding:
+        np.save(output_folder / f"shape.npy", vals["shapecode"][i].detach().cpu().numpy())
+        np.save(output_folder / f"exp.npy", vals["expcode"][i].detach().cpu().numpy())
+        np.save(output_folder / f"tex.npy", vals["texcode"][i].detach().cpu().numpy())
+        np.save(output_folder / f"pose.npy", vals["posecode"][i].detach().cpu().numpy())
+        np.save(output_folder / f"detail.npy", vals["detailcode"][i].detach().cpu().numpy())
+    elif i is None:
         np.save(output_folder / name / f"shape.npy", vals["shapecode"].detach().cpu().numpy())
         np.save(output_folder / name / f"exp.npy", vals["expcode"].detach().cpu().numpy())
         np.save(output_folder / name / f"tex.npy", vals["texcode"].detach().cpu().numpy())
@@ -81,6 +87,14 @@ def test(deca, img):
     vals = deca.encode(img, training=False)
     vals, visdict = decode(deca, vals, training=False)
     return vals, visdict
+
+def encode(deca, img):
+    img["image"] = img["image"].cuda()
+    if len(img["image"].shape) == 3:
+        img["image"] = img["image"].view(1,3,224,224)
+    vals = deca.encode(img, training=False)
+
+    return vals
 
 
 def decode(emoca, values, training=False):

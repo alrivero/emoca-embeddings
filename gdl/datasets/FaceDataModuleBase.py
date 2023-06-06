@@ -47,6 +47,7 @@ from gdl.utils.FaceDetector import FAN, MTCNN, save_landmark
 #     pass
 import pickle as pkl
 import types
+from math import ceil
 
 
 class FaceDataModuleBase(pl.LightningDataModule):
@@ -242,6 +243,7 @@ class FaceDataModuleBase(pl.LightningDataModule):
             if self.save_detection_images:
                 out_detection_fname = out_detection_folder / (stem + self.processed_ext)
                 detection_fnames += [out_detection_fname.relative_to(self.output_dir)]
+                import pdb; pdb.set_trace()
                 if self.processed_ext in ['.JPG', '.jpg', ".jpeg", ".JPEG"]:
                     imsave(out_detection_fname, detection, quality=100)
                 else:
@@ -266,7 +268,122 @@ class FaceDataModuleBase(pl.LightningDataModule):
             FaceDataModuleBase.save_detections(bb_outfile, detection_fnames_all, landmark_fnames_all,
                                                 centers_all, sizes_all, fid)
 
+    def _detect_faces_in_image_batch(self, batch, detected_faces=None):
+        image_batch = torch.concat([torch.tensor(np.array(imread(Path(self.output_dir) / img_path)))[None] for img_path in batch])
+        image_batch = image_batch.permute(0, 3, 1, 2)
 
+        self._instantiate_detector()
+        out = self.face_detector.run_batch(image_batch, with_landmarks=True, detected_faces=detected_faces)
+
+        image_batch = image_batch / 255.
+        for i in range(len(out)):
+            bounding_boxes, bbox_type, landmarks = out[i]
+            image = image_batch[i].permute(1, 2, 0)
+
+            detection_images = []
+            detection_centers = []
+            detection_sizes = []
+            detection_landmarks = [] # landmarks wrt the detection image
+            original_landmarks = landmarks # landmarks wrt the original image
+
+            if len(bounding_boxes) == 0:
+                # print('no face detected! run original image')
+                out[i] = (
+                    detection_images,
+                    detection_centers,
+                    detection_images,
+                    bbox_type,
+                    detection_landmarks,
+                    original_landmarks
+                )
+                continue
+
+            for bi, bbox in enumerate(bounding_boxes):
+                left = bbox[0]
+                right = bbox[2]
+                top = bbox[1]
+                bottom = bbox[3]
+                old_size, center = bbox2point(left, right, top, bottom, type=bbox_type)
+
+                center[0] += abs(right-left)*self.bb_center_shift_x
+                center[1] += abs(bottom-top)*self.bb_center_shift_y
+
+                size = int(old_size * self.scale)
+
+                dst_image, dts_landmark = bbpoint_warp(image, center, size, self.image_size, landmarks=landmarks[bi])
+
+                # dst_image = dst_image.transpose(2, 0, 1)
+                #
+                detection_images += [(dst_image*255).astype(np.uint8)]
+                detection_centers += [center]
+                detection_sizes += [size]
+
+                # imsave(os.path.join("detection_%d.png" % bi), dst_image)
+
+                # to be checked
+                detection_landmarks += [dts_landmark]
+
+            out[i] = (detection_images, detection_centers, detection_sizes, bbox_type, detection_landmarks, original_landmarks)
+
+        del image_batch
+        return out
+        
+
+    def _detect_faces_in_image_batches_wrapper(self, frame_list, fids, out_detection_folder, out_landmark_folder, bb_outfile,
+                                       centers_all, sizes_all, detection_fnames_all, landmark_fnames_all, 
+                                       out_landmarks_all=None, out_landmarks_orig_all=None, out_bbox_type_all=None, batch_size=16):
+        
+        batch_steps = ceil(len(frame_list) / batch_size)
+        for i in tqdm(range(batch_steps)):
+            batch = frame_list[i * batch_size:(i + 1) * batch_size]
+            batch_fids = fids[i * batch_size:(i + 1) * batch_size]
+            out = self._detect_faces_in_image_batch(batch)
+
+            for j in range(len(out)):
+                detection_ims, centers, sizes, bbox_type, landmarks, orig_landmarks = out[j]
+                frame_fname = frame_list[batch_fids[j]]
+                
+                centers_all += [centers]
+                sizes_all += [sizes]
+                if out_landmarks_all is not None:
+                    out_landmarks_all += [landmarks]
+                if out_landmarks_orig_all is not None:
+                    out_landmarks_orig_all += [orig_landmarks]
+                if out_bbox_type_all is not None:
+                    out_bbox_type_all += [[bbox_type]*len(landmarks)]
+
+                # save detections
+                detection_fnames = []
+                landmark_fnames = []
+                for di, detection in enumerate(detection_ims):
+                    # save detection
+                    stem = frame_fname.stem + "_%.03d" % di
+                    if self.save_detection_images:
+                        out_detection_fname = out_detection_folder / (stem + self.processed_ext)
+                        detection_fnames += [out_detection_fname.relative_to(self.output_dir)]
+                        if self.processed_ext in ['.JPG', '.jpg', ".jpeg", ".JPEG"]:
+                            imsave(out_detection_fname, detection, quality=100)
+                        else:
+                            imsave(out_detection_fname, detection)
+                    # save landmarks
+                    if self.save_landmarks_frame_by_frame:
+                        if self.save_detection_images:
+                            out_landmark_fname = out_landmark_folder / (stem + ".pkl")
+                            landmark_fnames += [out_landmark_fname.relative_to(self.output_dir)]
+                            save_landmark(out_landmark_fname, landmarks[di], bbox_type)
+                        else: 
+                            out_landmark_fname = out_landmark_folder / (stem + ".pkl")
+                            landmark_fnames += [out_landmark_fname.relative_to(self.output_dir)]
+                            save_landmark(out_landmark_fname, orig_landmarks[di], bbox_type)
+
+                detection_fnames_all += [detection_fnames]
+                landmark_fnames_all += [landmark_fnames]
+
+                torch.cuda.empty_cache()
+                checkpoint_frequency = 100
+                if batch_fids[j] % checkpoint_frequency == 0:
+                    FaceDataModuleBase.save_detections(bb_outfile, detection_fnames_all, landmark_fnames_all,
+                                                        centers_all, sizes_all, batch_fids[j])
 
     def _segment_images(self, detection_fnames_or_ims, out_segmentation_folder, path_depth = 0, landmarks=None):
         import time

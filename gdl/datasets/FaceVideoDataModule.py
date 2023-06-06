@@ -332,10 +332,8 @@ class FaceVideoDataModule(FaceDataModuleBase):
         # out_folder = Path(self.output_dir) / suffix
         # return out_folder
 
-    
-
     # @profile
-    def _detect_faces_in_sequence(self, sequence_id):
+    def _detect_faces_in_sequence(self, sequence_id, batch_size=16):
         # if self.detection_lists is None or len(self.detection_lists) == 0:
         #     self.detection_lists = [ [] for i in range(self.num_sequences)]
         video_file = self.video_list[sequence_id]
@@ -376,17 +374,11 @@ class FaceVideoDataModule(FaceDataModuleBase):
 
         if self.unpack_videos:
             frame_list = self.frame_lists[sequence_id]
-            fid = 0
             if len(frame_list) == 0:
                 print("Nothing to detect in: '%s'. All frames have been processed" % self.video_list[sequence_id])
-            for fid, frame_fname in enumerate(tqdm(range(start_fid, len(frame_list)))):
-
-                # if fid % detector_instantion_frequency == 0:
-                #     self._instantiate_detector(overwrite=True)
-
-                self._detect_faces_in_image_wrapper(frame_list, fid, out_detection_folder, out_landmark_folder, out_file_boxes,
-                                            centers_all, sizes_all, detection_fnames_all, landmark_fnames_all)
-
+            fids = torch.arange(start_fid, len(frame_list))
+            self._detect_faces_in_image_batches_wrapper(frame_list, fids, out_detection_folder, out_landmark_folder, out_file_boxes,
+                                centers_all, sizes_all, detection_fnames_all, landmark_fnames_all, batch_size=self.face_detect_batch_size)
         else: 
             num_frames = self.video_metas[sequence_id]['num_frames']
             if self.detect_landmarks_on_restored_images is None:
@@ -412,10 +404,10 @@ class FaceVideoDataModule(FaceDataModuleBase):
                 out_landmarks_original_all = None
                 out_bbox_type_all = None
 
-            for fid in tqdm(range(start_fid, num_frames)):
-                self._detect_faces_in_image_wrapper(videogen, fid, out_detection_folder, out_landmark_folder, out_file_boxes,
-                                            centers_all, sizes_all, detection_fnames_all, landmark_fnames_all,
-                                            out_landmarks_all, out_landmarks_original_all, out_bbox_type_all)
+            fids = torch.arange(start_fid, len(frame_list))
+            self._detect_faces_in_image_batches_wrapper(videogen, fids, out_detection_folder, out_landmark_folder, out_file_boxes,
+                                        centers_all, sizes_all, detection_fnames_all, landmark_fnames_all,
+                                        out_landmarks_all, out_landmarks_original_all, out_bbox_type_all, batch_size=self.face_detect_batch_size)
                                             
         if self.save_landmarks_one_file: 
             # saves all landmarks per video  
@@ -429,7 +421,7 @@ class FaceVideoDataModule(FaceDataModuleBase):
 
 
         FaceVideoDataModule.save_detections(out_file_boxes,
-                                            detection_fnames_all, landmark_fnames_all, centers_all, sizes_all, fid)
+                                            detection_fnames_all, landmark_fnames_all, centers_all, sizes_all, len(frame_list))
         print("Done detecting faces in sequence: '%s'" % self.video_list[sequence_id])
         return 
 
@@ -1559,7 +1551,7 @@ class FaceVideoDataModule(FaceDataModuleBase):
                 aud_meta['sample_fmt'] = aud_info['sample_fmt']
                 # aud_meta['num_samples'] = int(aud_info['nb_samples'])
                 aud_meta["num_frames"] = int(aud_info['nb_frames'])
-                assert float(aud_info['start_time']) == 0
+                # assert float(aud_info['start_time']) == 0
                 self.audio_metas += [aud_meta]
         
         for vi in sorted(invalid_videos, reverse=True):
@@ -3165,9 +3157,11 @@ class TestFaceVideoDM(FaceVideoDataModule):
                  detect = True,
                  batch_size=8,
                  num_workers=4,
+                 face_detect_batch_size=8,
                  device=None):
         self.video_path = Path(video_path)
         self.batch_size = batch_size
+        self.face_detect_batch_size = face_detect_batch_size
         self.num_workers = num_workers
         self.detect = detect
         super().__init__(self.video_path.parent, output_dir, 

@@ -90,10 +90,11 @@ class FAN(FaceDetector):
     # @profile
     def run(self, image, with_landmarks=False, detected_faces=None):
         '''
-        image: 0-255, uint8, rgb, [h, w, 3]
+        images: 0-255, uint8, rgb, [b, h, w, 3]
         return: detected box list
         '''
         out = self.model.get_landmarks(image, detected_faces=detected_faces)
+        import pdb; pdb.set_trace()
         torch.cuda.empty_cache()
         if out is None:
             del out
@@ -118,6 +119,39 @@ class FAN(FaceDetector):
                 return boxes, 'kpt68', kpts
             else:
                 return boxes, 'kpt68'
+            
+    def run_batch(self, images, with_landmarks=False, detected_faces=None):
+        '''
+        image: 0-255, uint8, rgb, [h, w, 3]
+        return: detected box list
+        '''
+        out = self.model.get_landmarks_from_batch(images, detected_faces=detected_faces)
+        torch.cuda.empty_cache()
+        for i in range(len(out)):
+            if out[i] == []:
+                if with_landmarks:
+                    out[i] = ([], 'kpt68', [])
+                else:
+                    out[i] = ([], 'kpt68')
+            else:
+                boxes = []
+                kpts = []
+
+                kpt = out[i]
+                left = np.min(kpt[:, 0])
+                right = np.max(kpt[:, 0])
+                top = np.min(kpt[:, 1])
+                bottom = np.max(kpt[:, 1])
+                bbox = [left, top, right, bottom]
+                boxes += [bbox]
+                kpts += [kpt]
+                
+                if with_landmarks:
+                    out[i] = (boxes, 'kpt68', kpts)
+                else:
+                    out[i] = (boxes, 'kpt68')
+        
+        return out
 
     @torch.no_grad()
     def landmarks_from_batch_no_face_detection(self, images):
