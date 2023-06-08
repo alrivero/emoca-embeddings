@@ -26,6 +26,7 @@ import argparse
 from gdl_apps.EMOCA.utils.io import save_obj, save_images, save_codes, test, encode
 import os
 import debug
+from torch.multiprocessing import Process, Queue
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -37,8 +38,7 @@ def str2bool(v):
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
-
-def reconstruct_video(args):
+def process_video(filename, args, gpuID, process_ID, gpu_queue):
     path_to_models = args.path_to_models
     input_videos = args.input_videos
     model_name = args.model_name
@@ -47,41 +47,63 @@ def reconstruct_video(args):
 
     ## 0.0) Load the model
     mode = args.mode
-    emoca, conf = load_model(path_to_models, model_name, mode)
-    emoca.cuda()
+    emoca, conf = load_model(path_to_models, model_name, mode).to(device=f"cuda:{gpuID}")
     emoca.eval()
 
+     ## 1) Process the video - extract the frames from video and detected faces
+    f_path = os.path.join(input_videos, filename)
+    dm = TestFaceVideoDM(f_path, Path(output_folder) / filename[:-4], processed_subfolder=processed_subfolder, 
+            batch_size=128, num_workers=12, face_detect_batch_size=16)
+    dm.prepare_data()
+    dm.setup()
+    processed_subfolder = Path(dm.output_dir).name
+
+    ## 2) Get the data loader with the detected faces
+    dl = dm.test_dataloader()
+
+    ## 3) Run the model on the data
+    for j, batch in enumerate (auto.tqdm( dl)):
+        current_bs = batch["image"].shape[0]
+        img = batch
+        vals = encode(emoca, img)
+
+        for i in range(current_bs):
+            name =  batch["image_name"][i]
+            sample_output_folder = Path(output_folder) / filename[:-4] / name
+            sample_output_folder.mkdir(parents=True, exist_ok=True)
+            save_codes(sample_output_folder, name, vals, i)
+    
+    # 4) Report back a sucess to the queue
+    gpu_queue.put((gpuID, process_ID))
+
+def encode_videos(args):
+    path_to_models = args.path_to_models
+    input_videos = args.input_videos
+    model_name = args.model_name
+    output_folder = args.output_folder
+    processed_subfolder = args.processed_subfolder
+    gpus_used = [int(x) for x in args.gpus.split(" ")]
+
+    gpu_queue = Queue()
+    for id in gpus_used:
+        for i in range(args.tasks_per_gpu):
+            Queue.put(id)
+
     ## 0.1) Iterate over all videos in a directory
+    active_processes = [[]] * max(gpus_used)
     for filename in os.listdir(input_videos):
         f_path = os.path.join(input_videos, filename)
         if not f_path.endswith(".mp4"):
             continue
 
-        print(f"Processing {filename}")
+        available_gpu, prev_process = Queue.get()
+        del active_processes[prev_process]
+        video_encoding_proc = Process(target=process_video, args=(filename, args, available_gpu, len(active_processes[available_gpu]), gpu_queue))
+        video_encoding_proc.start()
+        active_processes[available_gpu].append(video_encoding_proc)
+
+        print(f"Now Processing {filename}")
    
-        ## 1) Process the video - extract the frames from video and detected faces
-        dm = TestFaceVideoDM(f_path, Path(output_folder) / filename[:-4], processed_subfolder=processed_subfolder, 
-            batch_size=128, num_workers=12, face_detect_batch_size=8)
-        dm.prepare_data()
-        dm.setup()
-        processed_subfolder = Path(dm.output_dir).name
-
-
-        ## 2) Get the data loadeer with the detected faces
-        dl = dm.test_dataloader()
-
-        ## 3) Run the model on the data
-        for j, batch in enumerate (auto.tqdm( dl)):
-            current_bs = batch["image"].shape[0]
-            img = batch
-            vals = encode(emoca, img)
-
-            for i in range(current_bs):
-                name =  batch["image_name"][i]
-                sample_output_folder = Path(output_folder) / filename[:-4] / name
-                sample_output_folder.mkdir(parents=True, exist_ok=True)
-                save_codes(sample_output_folder, name, vals, i)
-            
     print("Done")
 
 
@@ -114,6 +136,8 @@ def parse_args():
     parser.add_argument('--black_background', type=str2bool, default=False, help="If true, the background of the reconstruction video will be black")
     parser.add_argument('--use_mask', type=str2bool, default=True, help="If true, the background of the reconstruction video will be black")
     parser.add_argument('--logger', type=str, default="", choices=["", "wandb"], help="Specify how to log the results if at all.")
+    parser.add_argument('--gpus', type=str, default="0", help="Defines which gpus to use")
+    parser.add_argument('--tasks_per_gpu', type=str, default="0", help="Defines which gpus to use")
     
     args = parser.parse_args()
     return args
@@ -121,7 +145,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    reconstruct_video(args)
+    encode_videos(args)
     print("Done")
 
 
